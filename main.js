@@ -1,8 +1,21 @@
 const { LinearClient } = require("bybit-api")
-const { apiKey, apiSecret, strategy, delayTime } = require("./config.json")
 const { default: Decimal } = require("decimal.js")
-const { symbol, isTriggerNow, isTrailingStop, baseTriggerPrice, trailValue } =
-  strategy
+const { apiKey, apiSecret, strategy, delayTime } = require("./config.json")
+const {
+  placeOrReplaceOrder,
+  getActiveOrderIdAndPrice,
+  sleep,
+} = require("./helper")
+const {
+  symbol,
+  isTriggerNow,
+  isTrailingStop,
+  baseTriggerPrice,
+  trailValue,
+  isReduceAll,
+  reduceSize,
+} = strategy
+
 const client = new LinearClient({
   key: apiKey,
   secret: apiSecret,
@@ -11,23 +24,20 @@ const client = new LinearClient({
 
 let isPriceTriggered = isTriggerNow || false
 let isDone = false
-let closeSide = "Buy"
-let closeSize
+let closeSide, closeSize, expectSize, triggerPrice, closeOrderId, dPriceStep
 let dOrderPrice = new Decimal(0) // 目前訂單價格
-let dPriceStep = new Decimal(0)
 let dBestPrice = new Decimal(0) // 最佳價格(把價格擠到order最上方)
-let triggerPrice
-let closeOrderId
 
 const init = async () => {
   const { result } = await client.getPosition({ symbol: symbol })
   const { size, side } = result.find(({ size }) => size > 0)
-
   if (!size) {
-    console.log("size === 0")
+    console.log("[Done] size === 0")
     process.exit(0)
   }
-  closeSize = size
+
+  closeSize = isReduceAll ? size : reduceSize
+  expectSize = isReduceAll ? 0 : size - reduceSize
   closeSide = side === "Buy" ? "Sell" : "Buy"
 
   const { result: symbolsResult } = await client.getSymbols()
@@ -42,7 +52,7 @@ const init = async () => {
     triggerPrice = baseTriggerPrice
   }
 
-  console.log("[Init]", symbol, size, side, closeSide, dPriceStep, triggerPrice)
+  console.log("[Init]", symbol, closeSize, closeSide, triggerPrice)
 }
 
 const fetchBestPrice = async () => {
@@ -88,80 +98,57 @@ const fetchBestPrice = async () => {
     }
   }
 
-  // When price triggered, do the place order part
-  if (isPriceTriggered) {
-    if (!closeOrderId) {
-      // try to get exist order first
-      const { result } = await client.getActiveOrderList({
-        symbol: symbol,
-        order_status: "New",
-      })
-      closeOrderId = result?.data?.[0]?.order_id
+  const { result: positionResult } = await client.getPosition({
+    symbol: symbol,
+  })
+  const { size: positionSize } = positionResult.find(({ size }) => size > 0)
+  if (!positionSize || (!isReduceAll && positionSize <= expectSize)) {
+    isDone = true
+    return
+  }
 
-      if (closeOrderId) {
-        dOrderPrice = new Decimal(result.data[0].price)
-        console.log("[ActiveOrder]", dOrderPrice, closeOrderId)
-      }
-    }
+  if (!isPriceTriggered) return
 
-    // Find best price
-    if (closeSide === "Buy") {
-      const dBetterPrice = dHighestBid.plus(dPriceStep)
-      dBestPrice = dBetterPrice >= dLowestAsk ? dHighestBid : dBetterPrice
-    }
-    if (closeSide === "Sell") {
-      const dBetterPrice = dLowestAsk.minus(dPriceStep)
-      dBestPrice = dBetterPrice <= dHighestBid ? dLowestAsk : dBetterPrice
-    }
-    console.log("B", dHighestBid, "A", dLowestAsk, "P", dBestPrice, dOrderPrice)
-
-    // price is the same, do nothing
-    if (dOrderPrice.equals(dBestPrice)) return
-
-    // Place order with best price
-    const newOrderId = placeOrReplaceOrder({
-      orderId: closeOrderId,
+  // Execute place order (when price triggered)
+  if (!closeOrderId) {
+    const { orderId, price } = await getActiveOrderIdAndPrice({
+      client,
       symbol,
-      price: dBestPrice,
-      side: closeSide,
-      size: closeSize,
     })
-
-    dOrderPrice = dBestPrice
-    closeOrderId = newOrderId
-  }
-}
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
-
-const placeOrReplaceOrder = async ({ orderId, symbol, price, side, size }) => {
-  let newOrderId
-  if (orderId) {
-    const { ret_msg, result } = await client.replaceActiveOrder({
-      order_id: orderId,
-      symbol: symbol,
-      p_r_price: price,
-    })
-
-    newOrderId = result.orderId
-    console.log("[Replace!]", price, newOrderId, ret_msg)
-  } else {
-    const { ret_msg, result } = await client.placeActiveOrder({
-      side: side,
-      symbol: symbol,
-      order_type: "Limit",
-      price: price,
-      qty: size,
-      time_in_force: "PostOnly",
-      reduce_only: true,
-      close_on_trigger: false,
-      position_idx: 0,
-    })
-    newOrderId = result.orderId
-    console.log("[Place!]", size, price, newOrderId, ret_msg)
+    if (orderId && price) {
+      closeOrderId = orderId
+      dOrderPrice = new Decimal(price)
+      console.log("[ActiveOrder]", price, orderId)
+    }
   }
 
-  return newOrderId
+  // Find best price
+  if (closeSide === "Buy") {
+    const dBetterPrice = dHighestBid.plus(dPriceStep)
+    dBestPrice = dBetterPrice >= dLowestAsk ? dHighestBid : dBetterPrice
+  }
+  if (closeSide === "Sell") {
+    const dBetterPrice = dLowestAsk.minus(dPriceStep)
+    dBestPrice = dBetterPrice <= dHighestBid ? dLowestAsk : dBetterPrice
+  }
+  // price is the same, do nothing
+  if (dOrderPrice.equals(dBestPrice)) return
+
+  console.log("B", dHighestBid, "A", dLowestAsk, "P", dBestPrice, dOrderPrice)
+
+  // Place order with best price
+  const newOrderId = await placeOrReplaceOrder({
+    client,
+    orderId: closeOrderId,
+    symbol,
+    price: dBestPrice,
+    side: closeSide,
+    size: closeSize,
+  })
+  console.log("[Update!]", dOrderPrice, "=>", dBestPrice)
+
+  dOrderPrice = dBestPrice
+  closeOrderId = newOrderId
 }
 
 const main = async () => {
