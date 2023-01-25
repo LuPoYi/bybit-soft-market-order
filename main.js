@@ -1,23 +1,21 @@
 const { LinearClient } = require("bybit-api")
-
 const { apiKey, apiSecret, strategy, delayTime } = require("./config.json")
 const { default: Decimal } = require("decimal.js")
-const { symbol, IsTriggerNow, isTrailingStop, baseTriggerPrice, trailValue } =
+const { symbol, isTriggerNow, isTrailingStop, baseTriggerPrice, trailValue } =
   strategy
-
 const client = new LinearClient({
   key: apiKey,
   secret: apiSecret,
   testnet: false,
 })
 
-let isPriceTriggered = false
+let isPriceTriggered = isTriggerNow || false
 let isDone = false
 let closeSide = "Buy"
 let closeSize
-let dOrderPrice // 目前訂單價格
-let dPriceStep = new Decimal(1)
-let dBestPrice = new Decimal(1) // 最佳價格(把價格擠到order最上方)
+let dOrderPrice = new Decimal(0) // 目前訂單價格
+let dPriceStep = new Decimal(0)
+let dBestPrice = new Decimal(0) // 最佳價格(把價格擠到order最上方)
 let triggerPrice
 let closeOrderId
 
@@ -121,42 +119,49 @@ const fetchBestPrice = async () => {
     if (dOrderPrice.equals(dBestPrice)) return
 
     // Place order with best price
-    placeOrReplaceOrder({
+    const newOrderId = placeOrReplaceOrder({
       orderId: closeOrderId,
       symbol,
       price: dBestPrice,
-      size: closeSide,
+      side: closeSide,
+      size: closeSize,
     })
 
     dOrderPrice = dBestPrice
+    closeOrderId = newOrderId
   }
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-const placeOrReplaceOrder = async ({ orderId, symbol, price, size }) => {
+const placeOrReplaceOrder = async ({ orderId, symbol, price, side, size }) => {
+  let newOrderId
   if (orderId) {
-    const ans = await client.replaceActiveOrder({
+    const { ret_msg, result } = await client.replaceActiveOrder({
       order_id: orderId,
       symbol: symbol,
       p_r_price: price,
     })
 
-    console.log("[Replace!]", dBestPrice, ans.result.order_id, ans)
+    newOrderId = result.orderId
+    console.log("[Replace!]", price, newOrderId, ret_msg)
   } else {
-    const { result } = await client.placeActiveOrder({
-      side: closeSide,
+    const { ret_msg, result } = await client.placeActiveOrder({
+      side: side,
       symbol: symbol,
       order_type: "Limit",
       price: price,
       qty: size,
       time_in_force: "PostOnly",
       reduce_only: true,
-      close_on_trigger: true,
+      close_on_trigger: false,
+      position_idx: 0,
     })
-
-    console.log("[Place!]", dBestPrice, result.order_id)
+    newOrderId = result.orderId
+    console.log("[Place!]", size, price, newOrderId, ret_msg)
   }
+
+  return newOrderId
 }
 
 const main = async () => {

@@ -3,7 +3,7 @@
   "apiSecret": "",
   "strategy": {
     "symbol": "",
-    "IsTriggerNow": false,
+    "isTriggerNow": false,
     "isTrailingStop": false,
     "baseTriggerPrice": 87.87,
     "trailValue": 10
