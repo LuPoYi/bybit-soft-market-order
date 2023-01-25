@@ -1,0 +1,10 @@
+{
+  "name": "bybit-soft-market-order",
+  "version": "1.0.0",
+  "main": "main.js",
+  "license": "MIT",
+  "dependencies": {
+    "bybit-api": "^3.3.10",
+    "decimal.js": "^10.4.3"
+  }
+}
